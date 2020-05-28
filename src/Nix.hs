@@ -26,6 +26,7 @@ module Nix
     getSrcUrl,
     getSrcUrls,
     hasPatchNamed,
+    hasUpdateScript,
     lookupAttrPath,
     nixEvalET,
     numberOfFetchers,
@@ -80,7 +81,6 @@ nixEvalET (EvalOptions raw (Env env)) expr =
   ourReadProcessInterleaved_
     (setEnv env (proc "nix" (["eval", "-f", "."] <> rawOpt raw <> [T.unpack expr])))
     & fmapRT T.strip
-    & overwriteErrorT ("nix eval failed for \"" <> expr <> "\"")
 
 -- Error if the "new version" is actually newer according to nix
 assertNewerVersion :: MonadIO m => UpdateEnv -> ExceptT Text m ()
@@ -363,3 +363,16 @@ hasPatchNamed :: MonadIO m => Text -> Text -> ExceptT Text m Bool
 hasPatchNamed attrPath name = do
   ps <- getPatches attrPath
   return $ name `T.isInfixOf` ps
+
+hasUpdateScript :: MonadIO m => Text -> ExceptT Text m Bool
+hasUpdateScript attrPath = do
+  result <-
+    nixEvalET
+      (EvalOptions NoRaw (Env []))
+      ( "(let pkgs = import ./. {}; in builtins.hasAttr \"updateScript\" pkgs."
+          <> attrPath
+          <> ")"
+      )
+  case result of
+    "true" -> return True
+    _ -> return False
