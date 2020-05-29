@@ -33,6 +33,7 @@ module Nix
     numberOfHashes,
     parseStringList,
     resultLink,
+    runUpdateScript,
     sha256Zero,
     version,
     Raw (..),
@@ -45,6 +46,7 @@ import qualified Data.Text.Lazy.Encoding as TL
 import qualified Data.Vector as V
 import OurPrelude
 import qualified Polysemy.Error as Error
+import qualified System.Process.Typed as TP
 import qualified Process as P
 import qualified Process
 import System.Exit
@@ -376,3 +378,9 @@ hasUpdateScript attrPath = do
   case result of
     "true" -> return True
     _ -> return False
+
+runUpdateScript :: MonadIO m => Text -> ExceptT Text m (ExitCode, Text)
+runUpdateScript attrPath = do
+  ourReadProcessInterleaved $
+    TP.setStdin (TP.byteStringInput "\n") $
+    proc "nix-shell" ["maintainers/scripts/update.nix", "--argstr", "package", T.unpack attrPath]
