@@ -31,7 +31,7 @@ import OurPrelude hiding (throw)
 import System.Directory (doesDirectoryExist, getModificationTime, setCurrentDirectory)
 import System.Environment.XDG.BaseDir (getUserCacheDir)
 import System.Exit
-import Utils (Options (..), UpdateEnv (..), branchName, branchPrefix)
+import Utils (Options (..), Context (..), branchName, branchPrefix)
 
 clean :: ProcessConfig () () ()
 clean = silently "git clean -fdx"
@@ -90,8 +90,8 @@ fetch =
   runProcessNoIndexIssue_ $
     silently "git fetch -q --prune --multiple upstream origin"
 
-push :: MonadIO m => UpdateEnv -> ExceptT Text m ()
-push updateEnv =
+push :: MonadIO m => Context -> ExceptT Text m ()
+push context =
   runProcessNoIndexIssue_
     ( proc
         "git"
@@ -99,9 +99,9 @@ push updateEnv =
             "--force",
             "--set-upstream",
             "origin",
-            T.unpack (branchName updateEnv)
+            T.unpack (branchName (updateEnv context))
           ]
-            ++ ["--dry-run" | not (doPR (options updateEnv))]
+            ++ ["--dry-run" | not (doPR (options context))]
         )
     )
 

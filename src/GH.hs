@@ -26,7 +26,7 @@ import GitHub.Data.Name (Name (..))
 import OurPrelude
 import qualified Text.Regex.Applicative.Text as RE
 import Text.Regex.Applicative.Text ((=~))
-import Utils (UpdateEnv (..), Version)
+import Utils (Context (..), UpdateEnv (..), Version)
 import qualified Utils as U
 
 default (T.Text)
@@ -37,18 +37,25 @@ gReleaseUrl auth (URLParts o r t) =
     bimap (T.pack . show) (getUrl . releaseHtmlUrl)
       <$> liftIO (github auth (releaseByTagNameR o r t))
 
-releaseUrl :: MonadIO m => UpdateEnv -> Text -> ExceptT Text m Text
-releaseUrl env url = do
+releaseUrl :: MonadIO m => Context -> Text -> ExceptT Text m Text
+releaseUrl context url = do
   urlParts <- parseURL url
-  gReleaseUrl (authFrom env) urlParts
+  gReleaseUrl (authFrom context) urlParts
 
-pr :: MonadIO m => UpdateEnv -> Text -> Text -> Text -> Text -> ExceptT Text m Text
-pr env title body prHead base = do
+pr :: MonadIO m => Context -> Text -> Text -> Text -> Text -> ExceptT Text m Text
+pr context title body prHead base = do
   ExceptT $
     bimap (T.pack . show) (getUrl . pullRequestUrl)
-      <$> (liftIO $ (github (authFrom env)
-         (createPullRequestR (N "nixos") (N "nixpkgs")
-          (CreatePullRequest title body prHead base))))
+      <$> ( liftIO $
+              ( github
+                  (authFrom context)
+                  ( createPullRequestR
+                      (N "nixos")
+                      (N "nixpkgs")
+                      (CreatePullRequest title body prHead base)
+                  )
+              )
+          )
 
 data URLParts
   = URLParts
@@ -155,26 +162,26 @@ openPullRequests githubToken =
     & fmap (first (T.pack . show))
 
 openAutoUpdatePR :: UpdateEnv -> Vector SimplePullRequest -> Bool
-openAutoUpdatePR updateEnv oprs = oprs & (V.find isThisPkg >>> isJust)
+openAutoUpdatePR uEnv oprs = oprs & (V.find isThisPkg >>> isJust)
   where
     isThisPkg simplePullRequest =
       let title = simplePullRequestTitle simplePullRequest
-          titleHasName = (packageName updateEnv <> ":") `T.isPrefixOf` title
-          titleHasNewVersion = newVersion updateEnv `T.isSuffixOf` title
+          titleHasName = (packageName uEnv <> ":") `T.isPrefixOf` title
+          titleHasNewVersion = newVersion uEnv `T.isSuffixOf` title
        in titleHasName && titleHasNewVersion
 
 authFromToken :: Text -> Auth
 authFromToken = OAuth . T.encodeUtf8
 
-authFrom :: UpdateEnv -> Auth
+authFrom :: Context -> Auth
 authFrom = authFromToken . U.githubToken . options
 
-checkExistingUpdatePR :: MonadIO m => UpdateEnv -> Text -> ExceptT Text m ()
-checkExistingUpdatePR env attrPath = do
+checkExistingUpdatePR :: MonadIO m => Context -> Text -> ExceptT Text m ()
+checkExistingUpdatePR context attrPath = do
   searchResult <-
     ExceptT
       $ liftIO
-      $ github (authFrom env) (searchIssuesR search)
+      $ github (authFrom context) (searchIssuesR search)
         & fmap (first (T.pack . show))
   if T.length (openPRReport searchResult) == 0
     then return ()
@@ -184,7 +191,7 @@ checkExistingUpdatePR env attrPath = do
             <> openPRReport searchResult
         )
   where
-    title = U.prTitle env attrPath
+    title = U.prTitle (updateEnv context) attrPath
     search = [interpolate|repo:nixos/nixpkgs $title |]
     openPRReport searchResult =
       searchResultResults searchResult & V.filter (issueClosedAt >>> isNothing)
@@ -193,12 +200,12 @@ checkExistingUpdatePR env attrPath = do
         & T.unlines
     report i = "- " <> issueTitle i <> "\n  " <> tshow (issueUrl i)
 
-latestVersion :: MonadIO m => UpdateEnv -> Text -> ExceptT Text m Version
-latestVersion env url = do
+latestVersion :: MonadIO m => Context -> Text -> ExceptT Text m Version
+latestVersion context url = do
   urlParts <- parseURL url
   r <-
     fmapLT tshow $ ExceptT
       $ liftIO
-      $ executeRequest (authFrom env)
+      $ executeRequest (authFrom context)
       $ latestReleaseR (owner urlParts) (repo urlParts)
   return $ T.dropWhile (\c -> c == 'v' || c == 'V') (releaseTagName r)

@@ -7,10 +7,8 @@
 
 module Update
   ( addPatched,
-    cveAll,
     cveReport,
     prMessage,
-    sourceGithubAll,
     updateAll,
     updatePackage,
   )
@@ -27,7 +25,7 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Time.Calendar (showGregorian)
-import Data.Time.Clock (UTCTime, getCurrentTime, utctDay)
+import Data.Time.Clock (getCurrentTime, utctDay)
 import qualified GH
 import qualified Git
 import NVD (getCVEs, withVulnDB)
@@ -42,6 +40,8 @@ import Utils
     URL,
     UpdateEnv (..),
     Version,
+    Context (..),
+    MergeBaseOutpathsInfo (..),
     branchName,
     logDir,
     parseUpdates,
@@ -52,11 +52,6 @@ import Prelude hiding (log)
 
 default (T.Text)
 
-data MergeBaseOutpathsInfo
-  = MergeBaseOutpathsInfo
-      { lastUpdated :: UTCTime,
-        mergeBaseOutpaths :: Set ResultLine
-      }
 
 log' :: MonadIO m => FilePath -> Text -> m ()
 log' logFile msg = do
@@ -76,20 +71,20 @@ getLog o = do
   if batchUpdate o
     then do
       logFile <- logFileName
-      let log = log' logFile
+      let l = log' logFile
       T.appendFile logFile "\n\n"
-      return log
+      return l
     else return T.putStrLn
 
 notifyOptions :: (Text -> IO ()) -> Options -> IO ()
-notifyOptions log o = do
+notifyOptions l o = do
   let repr f = if f o then "YES" else " NO"
   let pr = repr doPR
   let cachix = repr pushToCachix
   let outpaths = repr calculateOutpaths
   let cve = repr makeCVEReport
   let review = repr runNixpkgsReview
-  log $ [interpolate|
+  l $ [interpolate|
     Configured Nixpkgs-Update Options:
     ----------------------------------
     Send pull request on success:  $pr
@@ -101,48 +96,13 @@ notifyOptions log o = do
 
 updateAll :: Options -> Text -> IO ()
 updateAll o updates = do
-  log <- getLog o
-  log "New run of nixpkgs-update"
-  notifyOptions log o
+  l <- getLog o
+  l "New run of nixpkgs-update"
+  notifyOptions l o
   twoHoursAgo <- runM $ Time.runIO Time.twoHoursAgo
   mergeBaseOutpathSet <-
     liftIO $ newIORef (MergeBaseOutpathsInfo twoHoursAgo S.empty)
-  updateLoop o log (parseUpdates updates) mergeBaseOutpathSet
-
-cveAll :: Options -> Text -> IO ()
-cveAll o updates = do
-  let u' = rights $ parseUpdates updates
-  results <-
-    mapM
-      ( \(p, oldV, newV, url) -> do
-          r <- cveReport (UpdateEnv p oldV newV url o)
-          return $ p <> ": " <> oldV <> " -> " <> newV <> "\n" <> r
-      )
-      u'
-  T.putStrLn (T.unlines results)
-
-sourceGithubAll :: Options -> Text -> IO ()
-sourceGithubAll o updates = do
-  let u' = rights $ parseUpdates updates
-  _ <-
-    runExceptT $ do
-      Git.fetchIfStale <|> liftIO (T.putStrLn "Failed to fetch.")
-      Git.cleanAndResetTo "master"
-  mapM_
-    ( \(p, oldV, newV, url) -> do
-        let updateEnv = UpdateEnv p oldV newV url o
-        runExceptT $ do
-          attrPath <- Nix.lookupAttrPath updateEnv
-          srcUrl <- Nix.getSrcUrl attrPath
-          v <- GH.latestVersion updateEnv srcUrl
-          if v /= newV
-            then
-              liftIO
-                $ T.putStrLn
-                $ p <> ": " <> oldV <> " -> " <> newV <> " -> " <> v
-            else return ()
-    )
-    u'
+  updateLoop o l (parseUpdates updates) mergeBaseOutpathSet
 
 updateLoop ::
   Options ->
@@ -150,18 +110,19 @@ updateLoop ::
   [Either Text (Text, Version, Version, Maybe URL)] ->
   IORef MergeBaseOutpathsInfo ->
   IO ()
-updateLoop _ log [] _ = log "nixpkgs-update finished"
-updateLoop o log (Left e : moreUpdates) mergeBaseOutpathsContext = do
-  log e
-  updateLoop o log moreUpdates mergeBaseOutpathsContext
-updateLoop o log (Right (pName, oldVer, newVer, url) : moreUpdates) mergeBaseOutpathsContext = do
-  log (pName <> " " <> oldVer <> " -> " <> newVer <> fromMaybe "" (fmap (" " <>) url))
-  let updateEnv = UpdateEnv pName oldVer newVer url o
-  updated <- updatePackageBatch log updateEnv mergeBaseOutpathsContext
+updateLoop _ l [] _ = l "nixpkgs-update finished"
+updateLoop o l (Left e : moreUpdates) mergeBaseOutpathsContext = do
+  l e
+  updateLoop o l moreUpdates mergeBaseOutpathsContext
+updateLoop o l (Right (pName, oldVer, newVer, url) : moreUpdates) mergeBaseOutpathsContext = do
+  l (pName <> " " <> oldVer <> " -> " <> newVer <> fromMaybe "" (fmap (" " <>) url))
+  let uEnv = UpdateEnv pName oldVer newVer url
+  let context = Context o mergeBaseOutpathsContext uEnv l
+  updated <- updatePackageBatch context
   case updated of
     Left failure -> do
-      log $ "FAIL " <> failure
-      cleanupResult <- runExceptT $ Git.cleanup (branchName updateEnv)
+      l $ "FAIL " <> failure
+      cleanupResult <- runExceptT $ Git.cleanup (branchName uEnv)
       case cleanupResult of
         Left e -> liftIO $ print e
         _ ->
@@ -170,67 +131,67 @@ updateLoop o log (Right (pName, oldVer, newVer, url) : moreUpdates) mergeBaseOut
               let Just newNewVersion = ".0" `T.stripSuffix` newVer
                in updateLoop
                     o
-                    log
+                    l
                     (Right (pName, oldVer, newNewVersion, url) : moreUpdates)
                     mergeBaseOutpathsContext
-            else updateLoop o log moreUpdates mergeBaseOutpathsContext
+            else updateLoop o l moreUpdates mergeBaseOutpathsContext
     Right _ -> do
-      log "SUCCESS"
-      updateLoop o log moreUpdates mergeBaseOutpathsContext
+      l "SUCCESS"
+      updateLoop o l moreUpdates mergeBaseOutpathsContext
 
 -- Arguments this function should have to make it testable:
 -- - the merge base commit (should be updated externally to this function)
 -- - the merge base context should be updated externally to this function
 -- - the commit for branches: master, staging, staging-next, python-unstable
 updatePackageBatch ::
-  (Text -> IO ()) ->
-  UpdateEnv ->
-  IORef MergeBaseOutpathsInfo ->
+  Context ->
   IO (Either Text ())
-updatePackageBatch log updateEnv mergeBaseOutpathsContext =
+updatePackageBatch context =
   runExceptT $ do
-    let pr = doPR . options $ updateEnv
+    let uEnv = updateEnv context
+    let pr = doPR . options $ context
+    let batch = (batchUpdate . options $ context)
     --
     -- Filters that don't need git
-    Blacklist.packageName (packageName updateEnv)
-    Nix.assertNewerVersion updateEnv
+    Blacklist.packageName (packageName uEnv)
+    Nix.assertNewerVersion uEnv
     --
     -- Update our git checkout
     Git.fetchIfStale <|> liftIO (T.putStrLn "Failed to fetch.")
     when pr $
-      Git.checkAutoUpdateBranchDoesntExist (packageName updateEnv)
+      Git.checkAutoUpdateBranchDoesntExist (packageName uEnv)
     Git.cleanAndResetTo "master"
     --
     -- Filters: various cases where we shouldn't update the package
-    attrPath <- Nix.lookupAttrPath updateEnv
+    attrPath <- Nix.lookupAttrPath uEnv
     when pr $
-      GH.checkExistingUpdatePR updateEnv attrPath
+      GH.checkExistingUpdatePR context attrPath
     Blacklist.attrPath attrPath
-    Version.assertCompatibleWithPathPin updateEnv attrPath
+    Version.assertCompatibleWithPathPin uEnv attrPath
     srcUrls <- Nix.getSrcUrls attrPath
     Blacklist.srcUrl srcUrls
     derivationFile <- Nix.getDerivationFile attrPath
-    assertNotUpdatedOn updateEnv derivationFile "master"
-    assertNotUpdatedOn updateEnv derivationFile "staging"
-    assertNotUpdatedOn updateEnv derivationFile "staging-next"
-    assertNotUpdatedOn updateEnv derivationFile "python-unstable"
+    assertNotUpdatedOn uEnv derivationFile "master"
+    assertNotUpdatedOn uEnv derivationFile "staging"
+    assertNotUpdatedOn uEnv derivationFile "staging-next"
+    assertNotUpdatedOn uEnv derivationFile "python-unstable"
     --
     -- Calculate output paths for rebuilds and our merge base
-    Git.checkoutAtMergeBase (branchName updateEnv)
-    let calcOutpaths = calculateOutpaths . options $ updateEnv
+    Git.checkoutAtMergeBase (branchName uEnv)
+    let calcOutpaths = calculateOutpaths . options $ context
     oneHourAgo <- liftIO $ runM $ Time.runIO Time.oneHourAgo
-    mergeBaseOutpathsInfo <- liftIO $ readIORef mergeBaseOutpathsContext
+    mbOutpathsInfo <- liftIO $ readIORef (mergeBaseOutpathsInfo context)
     mergeBaseOutpathSet <-
-      if calcOutpaths && lastUpdated mergeBaseOutpathsInfo < oneHourAgo
+      if calcOutpaths && lastUpdated mbOutpathsInfo < oneHourAgo
         then do
           mbos <- currentOutpathSet
           now <- liftIO getCurrentTime
           liftIO $
-            writeIORef mergeBaseOutpathsContext (MergeBaseOutpathsInfo now mbos)
+            writeIORef (mergeBaseOutpathsInfo context) (MergeBaseOutpathsInfo now mbos)
           return mbos
         else
           if calcOutpaths
-            then return $ mergeBaseOutpaths mergeBaseOutpathsInfo
+            then return $ mergeBaseOutpaths mbOutpathsInfo
             else return $ dummyOutpathSetBefore attrPath
     --
     -- Get the original values for diffing purposes
@@ -246,13 +207,13 @@ updatePackageBatch log updateEnv mergeBaseOutpathsContext =
     -- At this point, we've stashed the old derivation contents and validated
     -- that we actually should be touching this file. Get to work processing the
     -- various rewrite functions!
-    let rwArgs = Rewrite.Args updateEnv attrPath derivationFile derivationContents
-    rewriteMsgs <- Rewrite.runAll log rwArgs
+    let rwArgs = Rewrite.Args context attrPath derivationFile derivationContents
+    rewriteMsgs <- Rewrite.runAll rwArgs
     ----------------------------------------------------------------------------
     --
     -- Compute the diff and get updated values
     diffAfterRewrites <- Git.diff
-    lift . log $ "Diff after rewrites:\n" <> diffAfterRewrites
+    lift . (log context) $ "Diff after rewrites:\n" <> diffAfterRewrites
     updatedDerivationContents <- liftIO $ T.readFile derivationFile
     newSrcUrl <- Nix.getSrcUrl attrPath
     newHash <- Nix.getHash attrPath
@@ -268,14 +229,13 @@ updatePackageBatch log updateEnv mergeBaseOutpathsContext =
     Nix.build attrPath
     --
     -- Publish the result
-    lift . log $ "Successfully finished processing"
+    lift . (log context) $ "Successfully finished processing"
     result <- Nix.resultLink
-    publishPackage log updateEnv oldSrcUrl newSrcUrl attrPath result (Just opDiff) rewriteMsgs
+    publishPackage context oldSrcUrl newSrcUrl attrPath result (Just opDiff) rewriteMsgs
     Git.cleanAndResetTo "master"
 
 publishPackage ::
-  (Text -> IO ()) ->
-  UpdateEnv ->
+  Context ->
   Text ->
   Text ->
   Text ->
@@ -283,41 +243,42 @@ publishPackage ::
   Maybe (Set ResultLine) ->
   [Text] ->
   ExceptT Text IO ()
-publishPackage log updateEnv oldSrcUrl newSrcUrl attrPath result opDiff rewriteMsgs = do
+publishPackage context oldSrcUrl newSrcUrl attrPath result opDiff rewriteMsgs = do
+  let uEnv = updateEnv context
   let prBase =
         if (isNothing opDiff || numPackageRebuilds (fromJust opDiff) < 100)
         then "master"
         else "staging"
-  cachixTestInstructions <- doCachix log updateEnv result
+  cachixTestInstructions <- doCachix context result
   resultCheckReport <-
-    case Blacklist.checkResult (packageName updateEnv) of
-      Right () -> lift $ Check.result updateEnv (T.unpack result)
+    case Blacklist.checkResult (packageName uEnv) of
+      Right () -> lift $ Check.result context (T.unpack result)
       Left msg -> pure msg
   metaDescription <- Nix.getDescription attrPath <|> return T.empty
   metaHomepage <- Nix.getHomepageET attrPath <|> return T.empty
   metaChangelog <- Nix.getChangelog attrPath <|> return T.empty
-  cveRep <- liftIO $ cveReport updateEnv
-  releaseUrl <- GH.releaseUrl updateEnv newSrcUrl <|> return ""
+  cveRep <- liftIO $ cveReport context
+  releaseUrl <- GH.releaseUrl context newSrcUrl <|> return ""
   compareUrl <- GH.compareUrl oldSrcUrl newSrcUrl <|> return ""
   maintainers <- Nix.getMaintainers attrPath
-  let commitMsg = commitMessage updateEnv attrPath
+  let commitMsg = commitMessage context attrPath
   Git.commit commitMsg
   commitHash <- Git.headHash
   nixpkgsReviewMsg <-
-    if prBase /= "staging" && (runNixpkgsReview . options $ updateEnv)
-      then liftIO $ NixpkgsReview.runReport log commitHash
+    if prBase /= "staging" && (runNixpkgsReview . options $ context)
+      then liftIO $ NixpkgsReview.runReport (Utils.log context) commitHash
       else return ""
   -- Try to push it three times
   when
-    (doPR . options $ updateEnv)
-    (Git.push updateEnv <|> Git.push updateEnv <|> Git.push updateEnv)
+    (doPR . options $ context)
+    (Git.push context <|> Git.push context <|> Git.push context)
   isBroken <- Nix.getIsBroken attrPath
   when
-    (batchUpdate . options $ updateEnv)
+    (batchUpdate . options $ context)
     (lift untilOfBorgFree)
   let prMsg =
         prMessage
-          updateEnv
+          context
           isBroken
           metaDescription
           metaHomepage
@@ -334,17 +295,17 @@ publishPackage log updateEnv oldSrcUrl newSrcUrl attrPath result opDiff rewriteM
           cveRep
           cachixTestInstructions
           nixpkgsReviewMsg
-  liftIO $ log prMsg
-  if (doPR . options $ updateEnv)
+  liftIO $ (log context) prMsg
+  if (doPR . options $ context)
     then do
       -- FIXME: #192 This needs to be detected dynamically. Use the hub token or GH library?
       let ghUser = "r-ryantm"
-      pullRequestUrl <- GH.pr updateEnv (prTitle updateEnv attrPath) prMsg (ghUser <> ":" <> (branchName updateEnv)) prBase
-      liftIO $ log pullRequestUrl
+      pullRequestUrl <- GH.pr context (prTitle (updateEnv context) attrPath) prMsg (ghUser <> ":" <> (branchName uEnv)) prBase
+      liftIO $ (log context) pullRequestUrl
     else liftIO $ T.putStrLn prMsg
 
-commitMessage :: UpdateEnv -> Text -> Text
-commitMessage updateEnv attrPath = prTitle updateEnv attrPath
+commitMessage :: Context -> Text -> Text
+commitMessage context attrPath = prTitle (updateEnv context) attrPath
 
 brokenWarning :: Bool -> Text
 brokenWarning False = ""
@@ -352,7 +313,7 @@ brokenWarning True =
   "- WARNING: Package has meta.broken=true; Please manually test this package update and remove the broken attribute."
 
 prMessage ::
-  UpdateEnv ->
+  Context ->
   Bool ->
   Text ->
   Text ->
@@ -370,7 +331,7 @@ prMessage ::
   Text ->
   Text ->
   Text
-prMessage updateEnv isBroken metaDescription metaHomepage metaChangelog rewriteMsgs releaseUrl compareUrl resultCheckReport commitHash attrPath maintainers resultPath opReport cveRep cachixTestInstructions nixpkgsReviewMsg =
+prMessage context isBroken metaDescription metaHomepage metaChangelog rewriteMsgs releaseUrl compareUrl resultCheckReport commitHash attrPath maintainers resultPath opReport cveRep cachixTestInstructions nixpkgsReviewMsg =
   -- Some components of the PR description are pre-generated prior to calling
   -- because they require IO, but in general try to put as much as possible for
   -- the formatting into the pure function so that we can control the body
@@ -415,7 +376,7 @@ prMessage updateEnv isBroken metaDescription metaHomepage metaChangelog rewriteM
             $nixpkgsReviewMsg
             |]
       pat link = [interpolate|This update was made based on information from $link.|]
-      sourceLinkInfo = maybe "" pat $ sourceURL updateEnv
+      sourceLinkInfo = maybe "" pat $ sourceURL (updateEnv context)
    in [interpolate|
        Semi-automatic update generated by [nixpkgs-update](https://github.com/ryantm/nixpkgs-update) tools. $sourceLinkInfo
        $brokenMsg
@@ -510,10 +471,10 @@ untilOfBorgFree = do
 
 assertNotUpdatedOn ::
   MonadIO m => UpdateEnv -> FilePath -> Text -> ExceptT Text m ()
-assertNotUpdatedOn updateEnv derivationFile branch = do
+assertNotUpdatedOn uEnv derivationFile branch = do
   Git.cleanAndResetTo branch
   derivationContents <- fmapLT tshow $ tryIO $ T.readFile derivationFile
-  Nix.assertOldVersionOn updateEnv branch derivationContents
+  Nix.assertOldVersionOn uEnv branch derivationContents
 
 addPatched :: Text -> Set CVE -> IO [(CVE, Bool)]
 addPatched attrPath set = do
@@ -529,18 +490,19 @@ addPatched attrPath set = do
         return (cve, p)
     )
 
-cveReport :: UpdateEnv -> IO Text
-cveReport updateEnv =
-  if not (makeCVEReport . options $ updateEnv)
+cveReport :: Context -> IO Text
+cveReport context =
+  let uEnv = updateEnv context in
+  if not (makeCVEReport . options $ context)
     then return ""
     else withVulnDB $ \conn -> do
-      let pname1 = packageName updateEnv
+      let pname1 = packageName (uEnv)
       let pname2 = T.replace "-" "_" pname1
-      oldCVEs1 <- getCVEs conn pname1 (oldVersion updateEnv)
-      oldCVEs2 <- getCVEs conn pname2 (oldVersion updateEnv)
+      oldCVEs1 <- getCVEs conn pname1 (oldVersion uEnv)
+      oldCVEs2 <- getCVEs conn pname2 (oldVersion uEnv)
       let oldCVEs = S.fromList (oldCVEs1 ++ oldCVEs2)
-      newCVEs1 <- getCVEs conn pname1 (newVersion updateEnv)
-      newCVEs2 <- getCVEs conn pname2 (newVersion updateEnv)
+      newCVEs1 <- getCVEs conn pname1 (newVersion uEnv)
+      newCVEs2 <- getCVEs conn pname2 (newVersion uEnv)
       let newCVEs = S.fromList (newCVEs1 ++ newCVEs2)
       let inOldButNotNew = S.difference oldCVEs newCVEs
           inNewButNotOld = S.difference newCVEs oldCVEs
@@ -549,9 +511,9 @@ cveReport updateEnv =
             if t == T.empty
               then "none"
               else t
-      inOldButNotNew' <- addPatched (packageName updateEnv) inOldButNotNew
-      inNewButNotOld' <- addPatched (packageName updateEnv) inNewButNotOld
-      inBoth' <- addPatched (packageName updateEnv) inBoth
+      inOldButNotNew' <- addPatched (packageName uEnv) inOldButNotNew
+      inNewButNotOld' <- addPatched (packageName uEnv) inNewButNotOld
+      inBoth' <- addPatched (packageName uEnv) inBoth
       let toMkdownList = fmap (uncurry cveLI) >>> T.unlines >>> ifEmptyNone
           fixedList = toMkdownList inOldButNotNew'
           newList = toMkdownList inNewButNotOld'
@@ -582,11 +544,11 @@ cveReport updateEnv =
        <br/>
       |]
 
-doCachix :: MonadIO m => (Text -> m ()) -> UpdateEnv -> Text -> ExceptT Text m Text
-doCachix log updateEnv resultPath =
-  if pushToCachix (options updateEnv)
+doCachix :: Context -> Text -> ExceptT Text IO Text
+doCachix context resultPath =
+  if pushToCachix (options context)
     then do
-      lift $ log ("cachix " <> (T.pack . show) resultPath)
+      lift $ (log context) ("cachix " <> (T.pack . show) resultPath)
       Nix.cachix resultPath
       return
         [interpolate|
@@ -605,7 +567,7 @@ doCachix log updateEnv resultPath =
        Or, **build yourself**:
        |]
     else do
-      lift $ log "skipping cachix"
+      lift $ (log context) "skipping cachix"
       return "Build yourself:"
 
 -- FIXME: We should delete updatePackageBatch, and instead have the updateLoop
@@ -618,18 +580,19 @@ updatePackage ::
 updatePackage o updateInfo = do
   runExceptT $ do
     let (p, oldV, newV, url) = head (rights (parseUpdates updateInfo))
-    let updateEnv = UpdateEnv p oldV newV url o
-    let log = T.putStrLn
-    liftIO $ notifyOptions log o
+    let uEnv = UpdateEnv p oldV newV url
+    let l = T.putStrLn
+    let context = Context o undefined uEnv l
+    liftIO $ notifyOptions l o
     --
     -- Update our git checkout and swap onto the update branch
     Git.fetchIfStale <|> liftIO (T.putStrLn "Failed to fetch.")
     Git.cleanAndResetTo "master"
-    Git.checkoutAtMergeBase (branchName updateEnv)
+    Git.checkoutAtMergeBase (branchName uEnv)
     -- Gather some basic information
-    Nix.assertNewerVersion updateEnv
-    attrPath <- Nix.lookupAttrPath updateEnv
-    Version.assertCompatibleWithPathPin updateEnv attrPath
+    Nix.assertNewerVersion uEnv
+    attrPath <- Nix.lookupAttrPath uEnv
+    Version.assertCompatibleWithPathPin uEnv attrPath
     derivationFile <- Nix.getDerivationFile attrPath
     --
     -- Get the original values for diffing purposes
@@ -642,13 +605,13 @@ updatePackage o updateInfo = do
     -- At this point, we've stashed the old derivation contents and validated
     -- that we actually should be touching this file. Get to work processing the
     -- various rewrite functions!
-    let rwArgs = Rewrite.Args updateEnv attrPath derivationFile derivationContents
-    msgs <- Rewrite.runAll log rwArgs
+    let rwArgs = Rewrite.Args context attrPath derivationFile derivationContents
+    msgs <- Rewrite.runAll rwArgs
     ----------------------------------------------------------------------------
     --
     -- Compute the diff and get updated values
     diffAfterRewrites <- Git.diff
-    lift . log $ "Diff after rewrites:\n" <> diffAfterRewrites
+    lift . l $ "Diff after rewrites:\n" <> diffAfterRewrites
     updatedDerivationContents <- liftIO $ T.readFile derivationFile
     newSrcUrl <- Nix.getSrcUrl attrPath
     newHash <- Nix.getHash attrPath
@@ -659,6 +622,6 @@ updatePackage o updateInfo = do
     Nix.build attrPath
     --
     -- Publish the result
-    lift . log $ "Successfully finished processing"
+    lift . l $ "Successfully finished processing"
     result <- Nix.resultLink
-    publishPackage log updateEnv oldSrcUrl newSrcUrl attrPath result Nothing msgs
+    publishPackage context oldSrcUrl newSrcUrl attrPath result Nothing msgs

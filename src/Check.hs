@@ -17,7 +17,7 @@ import System.Exit
 import System.IO.Temp (withSystemTempDirectory)
 import qualified Text.Regex.Applicative.Text as RE
 import Text.Regex.Applicative.Text ((=~), RE')
-import Utils (UpdateEnv (..), Version, nixBuildOptions)
+import Utils (Context (..), UpdateEnv (..), Version, nixBuildOptions)
 
 default (T.Text)
 
@@ -187,12 +187,13 @@ duGist resultPath =
           return $ "- du listing: " <> g <> "\n"
       )
 
-result :: MonadIO m => UpdateEnv -> String -> m Text
-result updateEnv resultPath =
+result :: MonadIO m => Context -> String -> m Text
+result context resultPath =
   liftIO $ do
-    let expectedVersion = newVersion updateEnv
+    let uEnv = updateEnv context
+    let expectedVersion = newVersion uEnv
         binaryDir = resultPath <> "/bin"
-    testsBuild <- checkTestsBuild (packageName updateEnv)
+    testsBuild <- checkTestsBuild (packageName uEnv)
     binExists <- doesDirectoryExist binaryDir
     binaries <-
       if binExists

@@ -24,9 +24,10 @@ spec = do
       nixQuotedHomepageBad <- T.readFile "test_data/quoted_homepage_bad.nix"
       nixQuotedHomepageGood <- T.readFile "test_data/quoted_homepage_good.nix"
       let options = Utils.Options False False "" False False False False
-      let updateEnv = Utils.UpdateEnv "inadyn" "2.5" "2.6" Nothing options
+      let updateEnv = Utils.UpdateEnv "inadyn" "2.5" "2.6" Nothing
+      let ctx = Utils.Context options undefined updateEnv undefined
       -- TODO test correct file is being read
-      let rwArgs = Rewrite.Args updateEnv "inadyn" undefined undefined
+      let rwArgs = Rewrite.Args ctx "inadyn" undefined undefined
       (logs, (newContents, result)) <-
         ( runFinal
             . embedToFinal

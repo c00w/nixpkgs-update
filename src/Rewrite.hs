@@ -24,7 +24,8 @@ import qualified Polysemy.Error as Error
 import Polysemy.Output (Output, output)
 import qualified Process
 import qualified Utils
-  ( UpdateEnv (..),
+  ( Context (..),
+    UpdateEnv (..),
     runLog,
     stripQuotes,
   )
@@ -48,14 +49,14 @@ import Prelude hiding (log)
 -}
 data Args
   = Args
-      { updateEnv :: Utils.UpdateEnv,
+      { ctx :: Utils.Context,
         attrPath :: Text,
         derivationFile :: FilePath,
         derivationContents :: Text
       }
 
-runAll :: (Text -> IO ()) -> Args -> ExceptT Text IO [Text]
-runAll log rwArgs = do
+runAll :: Args -> ExceptT Text IO [Text]
+runAll rwArgs = do
   let rewriters =
         [ ("version", Rewrite.version),
           ("rustCrateVersion", Rewrite.rustCrateVersion),
@@ -66,8 +67,8 @@ runAll log rwArgs = do
   msgs <- forM rewriters $ \(name, f) -> do
     let log' msg =
           if T.null name
-            then log msg
-            else log $ ("[" <> name <> "] ") <> msg
+            then (Utils.log $ ctx $ rwArgs) msg
+            else (Utils.log $ ctx $ rwArgs) $ ("[" <> name <> "] ") <> msg
     lift $ log' "" -- Print initial empty message to signal start of rewriter
     f log' rwArgs
   return $ catMaybes msgs
@@ -213,9 +214,9 @@ golangModuleVersion log args@(Args _ attrPth drvFile drvContents) = do
 -- Helper to update version and src attributes, re-computing the sha256.
 -- This is done by the generic version upgrader, but is also a sub-component of some of the others.
 srcVersionFix :: MonadIO m => Args -> ExceptT Text m ()
-srcVersionFix (Args env attrPth drvFile _) = do
+srcVersionFix (Args context attrPth drvFile _) = do
   oldHash <- Nix.getOldHash attrPth
-  _ <- lift $ File.replaceIO (Utils.oldVersion env) (Utils.newVersion env) drvFile
+  _ <- lift $ File.replaceIO (Utils.oldVersion (Utils.updateEnv context)) (Utils.newVersion (Utils.updateEnv context)) drvFile
   _ <- lift $ File.replaceIO oldHash Nix.sha256Zero drvFile
   newHash <- Nix.getHashFromBuild attrPth
   when (oldHash == newHash) $ throwE "Hashes equal; no update necessary"

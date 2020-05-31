@@ -16,8 +16,8 @@ import OurPrelude
 import qualified Repology
 import System.IO (BufferMode (..), hSetBuffering, stderr, stdout)
 import qualified System.Posix.Env as P
-import Update (cveAll, cveReport, sourceGithubAll, updateAll, updatePackage)
-import Utils (Options (..), UpdateEnv (..), getGithubToken)
+import Update (cveReport, updateAll, updatePackage)
+import Utils (Context (..), Options (..), UpdateEnv (..), getGithubToken)
 import Git
 
 default (T.Text)
@@ -37,8 +37,6 @@ data Command
   | DeleteDone
   | Version
   | UpdateVulnDB
-  | CheckAllVulnerable
-  | SourceGithub
   | FetchRepology
   | CheckVulnerable Text Text Text
 
@@ -89,15 +87,6 @@ commandParser =
         <> O.command
           "check-vulnerable"
           (O.info checkVulnerable (O.progDesc "checks if something is vulnerable"))
-        <> O.command
-          "check-all-vulnerable"
-          ( O.info
-              (pure CheckAllVulnerable)
-              (O.progDesc "checks all packages to update for vulnerabilities")
-          )
-        <> O.command
-          "source-github"
-          (O.info (pure SourceGithub) (O.progDesc "looks for updates on GitHub"))
         <> O.command
           "fetch-repology"
           (O.info (pure FetchRepology) (O.progDesc "fetches update from Repology and prints them to stdout"))
@@ -151,20 +140,14 @@ main = do
         Left t -> T.putStrLn ("error:" <> t)
         Right t -> T.putStrLn t
     UpdateVulnDB -> withVulnDB $ \_conn -> pure ()
-    CheckAllVulnerable -> do
-      setupNixpkgs undefined
-      updates <- T.readFile "packages-to-update.txt"
-      cveAll undefined updates
     CheckVulnerable productID oldVersion newVersion -> do
       setupNixpkgs undefined
       report <-
         cveReport
-          (UpdateEnv productID oldVersion newVersion Nothing (Options False False undefined False False False False))
+          (Context
+            (Options False False undefined True False False False)
+            undefined
+            (UpdateEnv productID oldVersion newVersion Nothing)
+            undefined)
       T.putStrLn report
-    SourceGithub -> do
-      token <- getGithubToken
-      updates <- T.readFile "packages-to-update.txt"
-      setupNixpkgs token
-      P.setEnv "GITHUB_TOKEN" (T.unpack token) True
-      sourceGithubAll (Options False False token False False False False) updates
     FetchRepology -> Repology.fetch

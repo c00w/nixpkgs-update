@@ -10,6 +10,8 @@ module Utils
     Boundary (..),
     VersionMatcher (..),
     UpdateEnv (..),
+    Context (..),
+    MergeBaseOutpathsInfo (..),
     URL,
     tRead,
     parseUpdates,
@@ -28,9 +30,11 @@ module Utils
 where
 
 import Data.Bits ((.|.))
+import Data.IORef
 import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import Data.Time.Clock (UTCTime)
 import Database.SQLite.Simple (ResultError (..), SQLData (..))
 import Database.SQLite.Simple.FromField
   ( FieldParser,
@@ -42,6 +46,7 @@ import Database.SQLite.Simple.Internal (Field (..))
 import Database.SQLite.Simple.Ok (Ok (..))
 import Database.SQLite.Simple.ToField (ToField, toField)
 import OurPrelude
+import Outpaths (ResultLine)
 import Polysemy.Output
 import System.Directory (doesDirectoryExist)
 import System.Posix.Directory (createDirectory)
@@ -99,6 +104,21 @@ instance FromField VersionMatcher where
 instance ToField VersionMatcher where
   toField = showField
 
+data MergeBaseOutpathsInfo
+  = MergeBaseOutpathsInfo
+      { lastUpdated :: UTCTime,
+        mergeBaseOutpaths :: Set ResultLine
+      }
+  deriving (Show)
+
+data Context
+  = Context
+      { options :: Options,
+        mergeBaseOutpathsInfo :: IORef MergeBaseOutpathsInfo,
+        updateEnv :: UpdateEnv,
+        log :: Text -> IO ()
+      }
+
 data Options
   = Options
       { doPR :: Bool,
@@ -116,14 +136,14 @@ data UpdateEnv
       { packageName :: Text,
         oldVersion :: Version,
         newVersion :: Version,
-        sourceURL :: Maybe URL,
-        options :: Options
+        sourceURL :: Maybe URL
       }
+  deriving (Show)
 
 prTitle :: UpdateEnv -> Text -> Text
-prTitle updateEnv attrPath =
-  let oV = oldVersion updateEnv
-      nV = newVersion updateEnv
+prTitle uEnv attrPath =
+  let oV = oldVersion (uEnv)
+      nV = newVersion (uEnv)
    in T.strip [interpolate| $attrPath: $oV -> $nV |]
 
 regDirMode :: FileMode

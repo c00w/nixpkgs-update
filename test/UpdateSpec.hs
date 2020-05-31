@@ -19,7 +19,8 @@ spec = do
   describe "PR message" do
     -- Common mock options
     let options = Utils.Options False False "" False False False False
-    let updateEnv = Utils.UpdateEnv "foobar" "1.0" "1.1" (Just "https://update-site.com") options
+    let updateEnv = Utils.UpdateEnv "foobar" "1.0" "1.1" (Just "https://update-site.com")
+    let ctx = Utils.Context options undefined updateEnv undefined
     let isBroken = False
     let metaDescription = "\"Foobar package description\""
     let metaHomepage = "\"https://foobar-homepage.com\""
@@ -39,13 +40,13 @@ spec = do
 
     it "matches a simple mock example" do
       expected <- T.readFile "test_data/expected_pr_description_1.md"
-      let actual = Update.prMessage updateEnv isBroken metaDescription metaHomepage metaChangelog rewriteMsgs releaseUrl compareUrl resultCheckReport commitHash attrPath maintainersCc resultPath opReport cveRep cachixTestInstructions nixpkgsReviewMsg
+      let actual = Update.prMessage ctx isBroken metaDescription metaHomepage metaChangelog rewriteMsgs releaseUrl compareUrl resultCheckReport commitHash attrPath maintainersCc resultPath opReport cveRep cachixTestInstructions nixpkgsReviewMsg
       T.writeFile "test_data/actual_pr_description_1.md" actual
       actual `shouldBe` expected
 
     it "does not include NixPkgs review section when no review was done" do
       expected <- T.readFile "test_data/expected_pr_description_2.md"
       let nixpkgsReviewMsg' = ""
-      let actual = Update.prMessage updateEnv isBroken metaDescription metaHomepage metaChangelog rewriteMsgs releaseUrl compareUrl resultCheckReport commitHash attrPath maintainersCc resultPath opReport cveRep cachixTestInstructions nixpkgsReviewMsg'
+      let actual = Update.prMessage ctx isBroken metaDescription metaHomepage metaChangelog rewriteMsgs releaseUrl compareUrl resultCheckReport commitHash attrPath maintainersCc resultPath opReport cveRep cachixTestInstructions nixpkgsReviewMsg'
       T.writeFile "test_data/actual_pr_description_2.md" actual
       actual `shouldBe` expected
